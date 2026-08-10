@@ -2,6 +2,8 @@
 
 **Fix ComfyUI Intel Arc VRAM issues — Intel XPU free-VRAM detection, model-switch freezes, KSampler 0% hangs and crashes**
 
+For Intel Arc / Intel XPU users experiencing KSampler stuck at 0%, VRAM overflow, crashes, or freezes when switching between heavy models.
+
 This is a small startup patch for **ComfyUI running on Intel XPU GPUs**. It does not add a visual node to the workflow. It only changes how ComfyUI answers one important question:
 
 > **How much VRAM is actually safe to use right now?**
