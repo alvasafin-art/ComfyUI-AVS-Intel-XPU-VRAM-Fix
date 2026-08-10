@@ -1,6 +1,6 @@
 # ComfyUI-AVS-Intel-XPU-VRAM-Fix
 
-**Fix Intel XPU / Intel Arc free-VRAM reporting in ComfyUI to reduce KSampler 0% hangs, model-switch freezes, and VRAM-related crashes.**
+**Fix ComfyUI freezes when switching models on Intel Arc — correct Intel XPU free-VRAM reporting to reduce KSampler 0% hangs and VRAM-related crashes.**
 
 This is a small startup patch for **ComfyUI running on Intel XPU GPUs**. It does not add a visual node to the workflow. It only changes how ComfyUI answers one important question:
 
