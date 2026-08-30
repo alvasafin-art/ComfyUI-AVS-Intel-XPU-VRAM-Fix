@@ -119,16 +119,6 @@ The original issue and patch were tested primarily on:
 
 Additional Intel XPU hardware and newer PyTorch/ComfyUI versions should still be tested independently.
 
-## Recommended ComfyUI 0.31.1 launch arguments from the original B580 tests
-
-These are not requirements of the VRAM patch:
-
-```text
---cache-classic --disable-async-offload --oneapi-device-selector level_zero:gpu
-```
-
-They reflected a separate stability combination observed on that specific ComfyUI/PyTorch setup and may be unnecessary on newer releases.
-
 ## Compatibility notes
 
 - Intended for Intel XPU / Intel Arc.
