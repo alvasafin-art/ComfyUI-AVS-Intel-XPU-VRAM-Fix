@@ -135,6 +135,10 @@ Additional Intel XPU hardware and newer PyTorch/ComfyUI versions should still be
 
 ## Credits
 
+Special thanks to Simon Lui for his help with the XPU VRAM implementation, additional testing, and valuable feedback during the work on ComfyUI PR #15487.
+
+His input helped improve the reliability and alignment of this patch with ComfyUI's XPU memory-management logic.
+
 Development, debugging, testing analysis, and documentation were assisted by OpenAI ChatGPT. The Intel Arc B580 testing and upstream PR validation were performed by the repository author.
 
 ## License
