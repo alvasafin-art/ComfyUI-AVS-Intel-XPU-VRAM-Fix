@@ -1,204 +1,152 @@
 # ComfyUI-AVS-Intel-XPU-VRAM-Fix
 
-**Fix ComfyUI Intel Arc VRAM issues — Intel XPU free-VRAM detection, model-switch freezes, KSampler 0% hangs and crashes**
+**Intel XPU / Intel Arc VRAM accounting fix for ComfyUI, aligned with ComfyUI PR #15487.**
 
-For Intel Arc / Intel XPU users experiencing KSampler stuck at 0%, VRAM overflow, crashes, or freezes when switching between heavy models.
+This custom node is a startup/runtime patch for Intel XPU. It does not add workflow nodes. It changes how ComfyUI reads available XPU VRAM so model loading/offloading decisions can use device-wide free-memory information when `torch.xpu.mem_get_info()` is trustworthy.
 
-This is a small startup patch for **ComfyUI running on Intel XPU GPUs**. It does not add a visual node to the workflow. It only changes how ComfyUI answers one important question:
+The patch was originally created after reproducible Intel Arc B580 failures including KSampler staying at 0%, freezes during heavy model switching, VRAM overflow, and crashes under memory pressure.
 
-> **How much VRAM is actually safe to use right now?**
+## What changed in v2.0.1
 
-On my Intel Arc B580, this patch helped eliminate several stability problems in heavy workflows: KSampler getting stuck at 0%, freezes while switching large models, and ComfyUI crashes during VRAM pressure.
+The standalone patch follows the same guarded logic and operating principle as [ComfyUI PR #15487](https://github.com/Comfy-Org/ComfyUI/pull/15487):
 
-## The problem in simple terms
+- uses one shared guarded XPU memory helper;
+- calls `torch.xpu.mem_get_info(dev)` when available;
+- rejects the result when total memory is non-positive, free memory is negative, free exceeds total, or globally used VRAM is smaller than PyTorch's reserved allocator memory;
+- falls back to the existing ComfyUI XPU calculation when `mem_get_info()` is unavailable or inconsistent;
+- uses the same helper for both `get_total_memory()` and `get_free_memory()`;
+- calculates reusable PyTorch cache as `reserved - active`;
+- caps usable free memory at the XPU total with `min(free + reusable_cache, total)`.
 
-ComfyUI needs to know how much VRAM is free before it decides whether to load more model data, keep a model on the GPU, or move something back to system RAM.
+The older standalone-only validation heuristics were removed so the core memory logic stays close to the PR.
 
-In ComfyUI 0.31.1, the Intel XPU path estimates free VRAM mainly from **PyTorch's own allocator statistics**. That tells ComfyUI how much memory PyTorch is actively using and caching, but it can miss VRAM that is already occupied outside that allocator by the driver, runtime, desktop, other applications, or other GPU allocations.
+## New AVS XPU setting
 
-This can make ComfyUI believe that more VRAM is available than is really safe to use.
+Open:
 
-When a large model is loaded or models are switched quickly, ComfyUI may then try to keep or load too much data before offloading memory. On my system this showed up as:
+**ComfyUI → Settings → Application settings → AVS XPU**
 
-- KSampler stuck at **0%**;
-- freezes when switching large models;
-- unstable model unload/load behavior;
-- ComfyUI crashes under heavy VRAM pressure.
+Use **Enable Intel XPU VRAM fix** to turn the fix on or off.
 
-## What the patch changes
+- **On** — guarded `torch.xpu.mem_get_info()` path is used, with the PR-compatible fallback.
+- **Off** — the extension immediately delegates to the original ComfyUI `get_total_memory()` and `get_free_memory()` functions. You do not need to delete or uninstall the custom node.
+- The state is persisted under the ComfyUI `user/avs_xpu_vram_fix/` directory and survives restart.
 
-The patch makes Intel XPU use a memory calculation closer to the one ComfyUI already uses for CUDA:
+The frontend setting is implemented with ComfyUI's extension settings API and appears under the dedicated **AVS XPU** category.
 
-1. Ask the XPU runtime for **global free GPU memory** using `torch.xpu.mem_get_info()`.
-2. Check how much of PyTorch's reserved VRAM cache can be reused.
-3. Add only that reusable cache to the globally free VRAM.
-4. Validate the result before giving it to ComfyUI.
-5. If XPU global memory reporting is unavailable or looks invalid, safely fall back to the original ComfyUI calculation.
+In v2.0.1 the settings callback reads the new boolean value from the correct callback argument. This fixes the v2.0.0 bug that could invert an Off action or send `false` during frontend initialization. Both ComfyUI's persisted UI setting and the backend `user/avs_xpu_vram_fix/config.json` state therefore stay aligned after the setting is changed.
 
-In simple terms:
+## Why the fix exists
 
-```text
-Stock XPU path:
-PyTorch allocator estimate -> ComfyUI decides how much VRAM it can use
+The stock Intel XPU path in affected ComfyUI versions estimates free VRAM mainly from PyTorch allocator statistics. That can miss memory already occupied outside PyTorch's allocator by the driver, desktop, runtime, other applications, or other GPU allocations.
 
-Patched XPU path:
-Actual global free VRAM + reusable PyTorch cache -> ComfyUI gets a safer VRAM estimate
-```
-
-This helps ComfyUI make better load/offload decisions instead of discovering too late that the GPU is already under memory pressure.
-
-## What it does NOT change
-
-The patch does not modify:
-
-- model weights;
-- image quality;
-- sampling or KSampler logic;
-- attention implementations;
-- Triton kernels;
-- model architecture;
-- quantization;
-- the normal behavior of CUDA, AMD, CPU, or other non-XPU devices.
-
-It only patches `comfy.model_management.get_free_memory()` **for Intel XPU devices**. Other backends continue using the original ComfyUI function.
-
-## Tested system
-
-This patch has been personally tested on one main system:
-
-| Component | Tested configuration |
-| --- | --- |
-| GPU | Intel Arc B580 12 GB |
-| System RAM | 32 GB |
-| OS | Windows 11 |
-| ComfyUI | 0.31.1 |
-| PyTorch | 2.13.0+xpu |
-| comfy-kitchen | 0.2.28 |
-| comfy-aimdo | 0.4.13 |
-| Python | 3.13.12 |
-
-I also received positive feedback from another user who tested the patch successfully.
-
-**Important:** this is still a small real-world test base. Different Intel GPUs, PyTorch versions, drivers, operating systems, and ComfyUI versions may behave differently.
-
-## Recommended ComfyUI 0.31.1 XPU launch arguments
-
-These arguments are **not required by this patch**. They are the most stable ComfyUI 0.31.1 XPU configuration I found on my own Intel Arc B580 after extensive heavy model-switching tests:
+The preferred patched calculation is:
 
 ```text
---cache-classic --disable-async-offload --oneapi-device-selector level_zero:gpu
+global free XPU VRAM
++ reusable PyTorch reserved cache
+= usable free VRAM reported to ComfyUI
 ```
 
-### What these arguments mean
+If the global XPU telemetry cannot be trusted, the patch uses the original ComfyUI calculation instead.
 
-| Argument | Why I use it |
-| --- | --- |
-| `--cache-classic` | Strongly recommended on my ComfyUI 0.31.1 setup. The default RAM-pressure cache was less stable during heavy multi-model switching. This may be unnecessary on older or future ComfyUI versions. |
-| `--disable-async-offload` | XPU does not enable async offload by default in ComfyUI 0.31.1, but this forces it off if it was enabled by your launcher or previous arguments. `--async-offload 2` was faster in some tests but noticeably less stable on ComfyUI 0.31.1. |
-| `--oneapi-device-selector level_zero:gpu` | Explicitly selects the Intel Level Zero GPU device. Intel/XPU-specific and unrelated to the VRAM patch itself. |
+## What it does not change
 
-These recommendations are specifically based on **ComfyUI 0.31.1** and my hardware. Future ComfyUI or PyTorch releases may not need them.
+It does not modify model weights, image quality, sampling, KSampler logic, attention implementations, quantization, model architecture, or the normal CUDA/AMD/CPU paths. The wrappers act only on XPU devices.
 
 ## Installation
 
 No additional Python packages are required.
 
-### Option 1 — Download ZIP
-
-1. Download the repository ZIP from GitHub.
-2. Fully close ComfyUI.
-3. Extract the repository folder into:
-
-```text
-ComfyUI/custom_nodes/
-```
-
-You should have:
-
-```text
-ComfyUI/custom_nodes/ComfyUI-AVS-Intel-XPU-VRAM-Fix/
-    __init__.py
-    README.md
-    LICENSE
-```
-
-4. Start ComfyUI.
-
-### Option 2 — Install with Git
-
-Open Command Prompt in your ComfyUI `custom_nodes` folder:
+Clone into `ComfyUI/custom_nodes/`:
 
 ```bat
 cd /d "PATH\TO\ComfyUI\custom_nodes"
 git clone https://github.com/alvasafin-art/ComfyUI-AVS-Intel-XPU-VRAM-Fix.git
 ```
 
-Restart ComfyUI.
+Restart ComfyUI and hard-refresh the browser once so the frontend extension is loaded.
 
-### Update with Git
+Folder layout:
+
+```text
+ComfyUI/custom_nodes/ComfyUI-AVS-Intel-XPU-VRAM-Fix/
+    __init__.py
+    README.md
+    CHANGELOG.md
+    LICENSE
+    web/
+        js/
+            avs_xpu_settings.js
+```
+
+## Updating
 
 ```bat
 cd /d "PATH\TO\ComfyUI\custom_nodes\ComfyUI-AVS-Intel-XPU-VRAM-Fix"
 git pull
 ```
 
-Restart ComfyUI.
+Restart ComfyUI after updating Python code. A hard browser refresh may be needed when frontend JavaScript changes.
 
-### Uninstall
+## Startup log
 
-Close ComfyUI and delete:
-
-```text
-ComfyUI/custom_nodes/ComfyUI-AVS-Intel-XPU-VRAM-Fix
-```
-
-## How to check that the patch is active
-
-At startup, look for messages similar to:
+When enabled, expect messages similar to:
 
 ```text
-[XPU Global VRAM V2] Active memory backend: torch.xpu.mem_get_info
-[XPU Global VRAM V2] Patch installed. Current usable free: ...
+[AVS XPU VRAM Fix] Active memory backend: torch.xpu.mem_get_info
+[AVS XPU VRAM Fix] v2.0.1 installed and enabled. Current usable free: ...
 ```
 
-If `torch.xpu.mem_get_info()` is unavailable or returns values that fail the patch's sanity checks, the patch logs a warning and automatically falls back to the original ComfyUI calculation.
+If `mem_get_info()` is unsupported or inconsistent, the log reports the fallback once and continues with stock ComfyUI XPU accounting.
 
-## Compatibility and limitations
+When disabled:
 
-- Intended only for **Intel XPU / Intel Arc** devices.
-- Personally tested on Intel Arc B580 with ComfyUI 0.31.1 and PyTorch 2.13.0+xpu.
-- One additional user has reported positive results.
-- The code itself does not depend on Windows-specific APIs, but other OS / Intel GPU combinations have not been personally validated yet.
-- `torch.xpu.mem_get_info()` support and behavior can differ between PyTorch / Intel driver stacks. The patch includes validation and a safe fallback for this reason.
-- A future ComfyUI release may change or fix XPU VRAM accounting upstream. If that happens, test stock ComfyUI first before keeping this patch enabled.
-- Other custom nodes that also replace `comfy.model_management.get_free_memory()` could conflict with this startup patch.
+```text
+[AVS XPU VRAM Fix] v2.0.1 installed but disabled by saved setting. Original ComfyUI memory accounting is active.
+```
 
-## Reporting results
+## Tested configuration
 
-If you test this patch, useful information includes:
+The original issue and patch were tested primarily on:
 
-- Intel GPU model;
-- VRAM and system RAM;
-- OS;
-- ComfyUI version;
-- PyTorch version;
-- Intel graphics driver version;
-- launch arguments;
-- model / quantization used;
-- whether you previously saw KSampler 0% hangs, model-switch freezes, OOM errors, or crashes;
-- whether the problem changed after installing the patch.
+| Component | Configuration |
+| --- | --- |
+| GPU | Intel Arc B580 12 GB |
+| OS | Windows 11 |
+| ComfyUI | 0.31.1 during the original validation cycle |
+| PyTorch | 2.13.0+xpu during the original validation cycle |
+
+Additional Intel XPU hardware and newer PyTorch/ComfyUI versions should still be tested independently.
+
+## Recommended ComfyUI 0.31.1 launch arguments from the original B580 tests
+
+These are not requirements of the VRAM patch:
+
+```text
+--cache-classic --disable-async-offload --oneapi-device-selector level_zero:gpu
+```
+
+They reflected a separate stability combination observed on that specific ComfyUI/PyTorch setup and may be unnecessary on newer releases.
+
+## Compatibility notes
+
+- Intended for Intel XPU / Intel Arc.
+- `torch.xpu.mem_get_info()` support varies across Intel devices and PyTorch stacks; the guarded fallback exists for this reason.
+- If ComfyUI merges PR #15487 or equivalent XPU VRAM logic upstream, disable this custom fix first and test stock ComfyUI. The custom node can then be removed if no longer needed.
+- Another custom node that replaces the same `comfy.model_management` functions can still conflict with this runtime patch.
 
 ## Technical references
 
-- ComfyUI 0.31.1 `get_free_memory()` implementation: https://github.com/Comfy-Org/ComfyUI/blob/v0.31.1/comfy/model_management.py
-- PyTorch XPU global memory API: https://docs.pytorch.org/docs/stable/generated/torch.xpu.memory.mem_get_info.html
+- ComfyUI PR #15487: https://github.com/Comfy-Org/ComfyUI/pull/15487
+- ComfyUI `model_management.py`: https://github.com/Comfy-Org/ComfyUI/blob/master/comfy/model_management.py
+- ComfyUI frontend settings system: https://github.com/Comfy-Org/ComfyUI_frontend/blob/main/docs/SETTINGS.md
+- PyTorch XPU `mem_get_info`: https://docs.pytorch.org/docs/stable/generated/torch.xpu.memory.mem_get_info.html
 
 ## Credits
 
-Development, debugging, testing analysis, and documentation were assisted by **OpenAI ChatGPT**.
+Development, debugging, testing analysis, and documentation were assisted by OpenAI ChatGPT. The Intel Arc B580 testing and upstream PR validation were performed by the repository author.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 (GPL-3.0).
-
-You are free to use, modify, redistribute, and commercially use this software under the terms of the GPL-3.0 license. Distributed modified versions must remain open source under the GPL-3.0 license.
+GNU General Public License v3.0 (GPL-3.0).
